@@ -12,8 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// maxContractBytes bounds scan contract files parsed from disk (32 MiB),
-// matching cautils.DefaultMaxFileSize and preventing uncontrolled memory allocation
+// maxContractBytes is the maximum allowed size for scan contract files (32 MiB),
+// matching cautils.DefaultMaxFileSize to prevent uncontrolled resource consumption
 // from oversized inputs or decompression bombs (CWE-400).
 const maxContractBytes int64 = 32 * 1024 * 1024
 
@@ -25,38 +25,38 @@ var (
 // openContractFile opens path for reading and rejects non-regular files (such as FIFOs,
 // device nodes, or directories). O_NONBLOCK ensures that opening a FIFO without a writer
 // fails or returns immediately rather than blocking the process indefinitely.
-func openContractFile(path string) (*os.File, error) {
+func openContractFile(path string) (*os.File, os.FileInfo, error) {
 	file, err := os.OpenFile(filepath.Clean(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if info.IsDir() {
 		file.Close()
-		return nil, fmt.Errorf("%q is a directory, not a file", path)
+		return nil, nil, fmt.Errorf("%q is a directory, not a file", path)
 	}
 	if !info.Mode().IsRegular() {
 		file.Close()
-		return nil, fmt.Errorf("%w: %q", ErrContractNotRegular, path)
+		return nil, nil, fmt.Errorf("%w: %q", ErrContractNotRegular, path)
 	}
-	return file, nil
+	return file, info, nil
 }
 
-// readContractFile returns the contents of the scan contract at path, reading at most
-// maxContractBytes bytes so that reading remains bounded.
+// readContractFile returns the contents of the scan contract at path. It bounds the read
+// to at most maxContractBytes+1 bytes (32 MiB + 1 byte) for overflow detection, rejecting
+// files that exceed the limit.
 func readContractFile(path string) ([]byte, error) {
-	file, err := openContractFile(path)
+	file, info, err := openContractFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	info, err := file.Stat()
-	if err == nil && info.Size() > maxContractBytes {
+	if info.Size() > maxContractBytes {
 		return nil, fmt.Errorf("%w: %q exceeds the %d byte limit", ErrContractTooLarge, path, maxContractBytes)
 	}
 

@@ -12,8 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// maxFleetConfigBytes bounds fleet config files parsed from disk (32 MiB),
-// matching cautils.DefaultMaxFileSize and preventing uncontrolled memory allocation
+// maxFleetConfigBytes is the maximum allowed size for fleet config files (32 MiB),
+// matching cautils.DefaultMaxFileSize to prevent uncontrolled resource consumption
 // from oversized inputs or decompression bombs (CWE-400).
 const maxFleetConfigBytes int64 = 32 * 1024 * 1024
 
@@ -25,38 +25,38 @@ var (
 // openFleetConfigFile opens path for reading and rejects non-regular files (such as FIFOs,
 // device nodes, or directories). O_NONBLOCK ensures that opening a FIFO without a writer
 // fails or returns immediately rather than blocking the process indefinitely.
-func openFleetConfigFile(path string) (*os.File, error) {
+func openFleetConfigFile(path string) (*os.File, os.FileInfo, error) {
 	file, err := os.OpenFile(filepath.Clean(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if info.IsDir() {
 		file.Close()
-		return nil, fmt.Errorf("%q is a directory, not a file", path)
+		return nil, nil, fmt.Errorf("%q is a directory, not a file", path)
 	}
 	if !info.Mode().IsRegular() {
 		file.Close()
-		return nil, fmt.Errorf("%w: %q", ErrFleetConfigNotRegular, path)
+		return nil, nil, fmt.Errorf("%w: %q", ErrFleetConfigNotRegular, path)
 	}
-	return file, nil
+	return file, info, nil
 }
 
-// readFleetConfigFile returns the contents of the fleet config at path, reading at most
-// maxFleetConfigBytes bytes so that reading remains bounded.
+// readFleetConfigFile returns the contents of the fleet config at path. It bounds the read
+// to at most maxFleetConfigBytes+1 bytes (32 MiB + 1 byte) for overflow detection, rejecting
+// files that exceed the limit.
 func readFleetConfigFile(path string) ([]byte, error) {
-	file, err := openFleetConfigFile(path)
+	file, info, err := openFleetConfigFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	info, err := file.Stat()
-	if err == nil && info.Size() > maxFleetConfigBytes {
+	if info.Size() > maxFleetConfigBytes {
 		return nil, fmt.Errorf("%w: %q exceeds the %d byte limit", ErrFleetConfigTooLarge, path, maxFleetConfigBytes)
 	}
 
