@@ -6,9 +6,69 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
+
+// maxContractBytes bounds scan contract files parsed from disk (32 MiB),
+// matching cautils.DefaultMaxFileSize and preventing uncontrolled memory allocation
+// from oversized inputs or decompression bombs (CWE-400).
+const maxContractBytes int64 = 32 * 1024 * 1024
+
+var (
+	ErrContractNotRegular = errors.New("scan contract is not a regular file")
+	ErrContractTooLarge   = errors.New("scan contract exceeds maximum size limit")
+)
+
+// openContractFile opens path for reading and rejects non-regular files (such as FIFOs,
+// device nodes, or directories). O_NONBLOCK ensures that opening a FIFO without a writer
+// fails or returns immediately rather than blocking the process indefinitely.
+func openContractFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(filepath.Clean(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		file.Close()
+		return nil, fmt.Errorf("%q is a directory, not a file", path)
+	}
+	if !info.Mode().IsRegular() {
+		file.Close()
+		return nil, fmt.Errorf("%w: %q", ErrContractNotRegular, path)
+	}
+	return file, nil
+}
+
+// readContractFile returns the contents of the scan contract at path, reading at most
+// maxContractBytes bytes so that reading remains bounded.
+func readContractFile(path string) ([]byte, error) {
+	file, err := openContractFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err == nil && info.Size() > maxContractBytes {
+		return nil, fmt.Errorf("%w: %q exceeds the %d byte limit", ErrContractTooLarge, path, maxContractBytes)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, maxContractBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxContractBytes {
+		return nil, fmt.Errorf("%w: %q exceeds the %d byte limit", ErrContractTooLarge, path, maxContractBytes)
+	}
+	return data, nil
+}
 
 type LoadOptions struct {
 	ContractName        string
@@ -18,7 +78,7 @@ type LoadOptions struct {
 }
 
 func LoadFile(path string, options LoadOptions) (*SelectedContract, error) {
-	contents, err := os.ReadFile(path)
+	contents, err := readContractFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read scan contract: %w", err)
 	}
